@@ -1,5 +1,5 @@
 import 'dart:io';
-
+import 'package:firebase_core/firebase_core.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -7,11 +7,16 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:googleapis/drive/v3.dart' as ga;
 import 'package:http/http.dart' as http;
+import 'package:http/http.dart';
 import 'package:path/path.dart' as path;
 import 'package:http/io_client.dart';
 import 'package:path_provider/path_provider.dart';
 
-void main() => runApp(MyApp());
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
+  runApp(MyApp());
+}
 
 class MyApp extends StatelessWidget {
   @override
@@ -32,17 +37,18 @@ class GoogleHttpClient extends IOClient {
   GoogleHttpClient(this._headers) : super();
 
   @override
-  Future<http.StreamedResponse> send(http.BaseRequest request) =>
+  Future<IOStreamedResponse> send(http.BaseRequest request) =>
       super.send(request..headers.addAll(_headers));
 
   @override
-  Future<http.Response> head(Object url, {Map<String, String> headers}) =>
-      super.head(url, headers: headers..addAll(_headers));
+  Future<http.Response> head(Uri url, {Map<String, String>? headers}) =>
+      super.head(url, headers: headers!..addAll(_headers));
 }
 
 class MyHomePage extends StatefulWidget {
-  MyHomePage({Key key, this.title}) : super(key: key);
   final String title;
+  MyHomePage({Key? key, required this.title}) : super(key: key);
+
   @override
   _MyHomePageState createState() => _MyHomePageState();
 }
@@ -52,18 +58,19 @@ class _MyHomePageState extends State<MyHomePage> {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final GoogleSignIn googleSignIn =
       GoogleSignIn(scopes: ['https://www.googleapis.com/auth/drive.appdata']);
-  GoogleSignInAccount googleSignInAccount;
-  ga.FileList list;
+  late GoogleSignInAccount googleSignInAccount;
+  ga.FileList? list;
   var signedIn = false;
 
   Future<void> _loginWithGoogle() async {
     signedIn = await storage.read(key: "signedIn") == "true" ? true : false;
     googleSignIn.onCurrentUserChanged
-        .listen((GoogleSignInAccount googleSignInAccount) async {
+        .listen((GoogleSignInAccount? googleSignInAccount) async {
       if (googleSignInAccount != null) {
         _afterGoogleLogin(googleSignInAccount);
       }
     });
+
     if (signedIn) {
       try {
         googleSignIn.signInSilently().whenComplete(() => () {});
@@ -75,9 +82,9 @@ class _MyHomePageState extends State<MyHomePage> {
         });
       }
     } else {
-      final GoogleSignInAccount googleSignInAccount =
+      final GoogleSignInAccount? googleSignInAccount =
           await googleSignIn.signIn();
-      _afterGoogleLogin(googleSignInAccount);
+      _afterGoogleLogin(googleSignInAccount!);
     }
   }
 
@@ -86,18 +93,19 @@ class _MyHomePageState extends State<MyHomePage> {
     final GoogleSignInAuthentication googleSignInAuthentication =
         await googleSignInAccount.authentication;
 
-    final AuthCredential credential = GoogleAuthProvider.getCredential(
+    final AuthCredential credential = GoogleAuthProvider.credential(
       accessToken: googleSignInAuthentication.accessToken,
       idToken: googleSignInAuthentication.idToken,
     );
 
-    final AuthResult authResult = await _auth.signInWithCredential(credential);
-    final FirebaseUser user = authResult.user;
+    final UserCredential authResult =
+        await _auth.signInWithCredential(credential);
+    final User user = authResult.user!;
 
     assert(!user.isAnonymous);
     assert(await user.getIdToken() != null);
 
-    final FirebaseUser currentUser = await _auth.currentUser();
+    final User currentUser = _auth.currentUser!;
     assert(user.uid == currentUser.uid);
 
     print('signInWithGoogle succeeded: $user');
@@ -123,28 +131,38 @@ class _MyHomePageState extends State<MyHomePage> {
   _uploadFileToGoogleDrive() async {
     var client = GoogleHttpClient(await googleSignInAccount.authHeaders);
     var drive = ga.DriveApi(client);
-    ga.File fileToUpload = ga.File();
-    var file = await FilePicker.getFile();
-    fileToUpload.parents = ["appDataFolder"];
-    fileToUpload.name = path.basename(file.absolute.path);
-    var response = await drive.files.create(
-      fileToUpload,
-      uploadMedia: ga.Media(file.openRead(), file.lengthSync()),
-    );
-    print(response);
+
+    FilePickerResult? file = await FilePicker.platform.pickFiles(withData: true);
+    ga.File response;
+    file!.files.forEach((element) async {
+      ga.File fileToUpload = ga.File();
+      fileToUpload.parents = ["appDataFolder"];
+      fileToUpload.name = path.basename(element.path!);
+      //print("elementpath ${element.path}");
+      response = await drive.files.create(
+        fileToUpload,
+        uploadMedia: ga.Media(ByteStream.fromBytes(element.bytes!), element.size),
+
+      );
+      print(response);
+    });
+
     _listGoogleDriveFiles();
   }
 
   Future<void> _listGoogleDriveFiles() async {
     var client = GoogleHttpClient(await googleSignInAccount.authHeaders);
     var drive = ga.DriveApi(client);
+    print("Drive");
+    print(drive);
+    print(drive.files);
     drive.files.list(spaces: 'appDataFolder').then((value) {
       setState(() {
         list = value;
       });
-      for (var i = 0; i < list.files.length; i++) {
-        print("Id: ${list.files[i].id} File Name:${list.files[i].name}");
-      }
+      list!.files!.forEach((f) {
+        print("Id: ${f.id} File Name:${f.name}");
+      });
     });
   }
 
@@ -152,12 +170,13 @@ class _MyHomePageState extends State<MyHomePage> {
     var client = GoogleHttpClient(await googleSignInAccount.authHeaders);
     var drive = ga.DriveApi(client);
     ga.Media file = await drive.files
-        .get(gdID, downloadOptions: ga.DownloadOptions.FullMedia);
+        .get(gdID, downloadOptions: ga.DownloadOptions.fullMedia) as ga.Media;
     print(file.stream);
 
     final directory = await getExternalStorageDirectory();
-    print(directory.path);
-    final saveFile = File('${directory.path}/${new DateTime.now().millisecondsSinceEpoch}$fName');
+    print(directory!.path);
+    final saveFile = File(
+        '${directory.path}/${new DateTime.now().millisecondsSinceEpoch}$fName');
     List<int> dataStore = [];
     file.stream.listen((data) {
       print("DataReceived: ${data.length}");
@@ -172,36 +191,40 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   List<Widget> generateFilesWidget() {
-    List<Widget> listItem = List<Widget>();
+    List<Widget> listItem = [];
     if (list != null) {
-      for (var i = 0; i < list.files.length; i++) {
+      int cont = -1;
+      list!.files!.forEach((element) {
+        cont++;
         listItem.add(Row(
           children: <Widget>[
             Container(
               width: MediaQuery.of(context).size.width * 0.05,
-              child: Text('${i + 1}'),
+              child: Text('${cont + 1}'),
             ),
             Expanded(
-              child: Text(list.files[i].name),
+              child: Text(element.name!),
             ),
             Container(
               width: MediaQuery.of(context).size.width * 0.3,
-              child: FlatButton(
-                child: Text(
-                  'Download',
-                  style: TextStyle(
-                    color: Colors.white,
-                  ),
-                ),
+              child: Container(
                 color: Colors.indigo,
-                onPressed: () {
-                  _downloadGoogleDriveFile(list.files[i].name, list.files[i].id);
-                },
+                child: TextButton(
+                  child: Text(
+                    'Download',
+                    style: TextStyle(
+                      color: Colors.white,
+                    ),
+                  ),
+                  onPressed: () {
+                    _downloadGoogleDriveFile(element.name!, element.id!);
+                  },
+                ),
               ),
             ),
           ],
         ));
-      }
+      });
     }
     return listItem;
   }
@@ -217,16 +240,20 @@ class _MyHomePageState extends State<MyHomePage> {
           mainAxisAlignment: MainAxisAlignment.center,
           children: <Widget>[
             (signedIn
-                ? FlatButton(
-                    child: Text('Upload File to Google Drive'),
-                    onPressed: _uploadFileToGoogleDrive,
+                ? Container(
+                    child: TextButton(
+                      child: Text('Upload File to Google Drive'),
+                      onPressed: _uploadFileToGoogleDrive,
+                    ),
                     color: Colors.green,
                   )
                 : Container()),
             (signedIn
-                ? FlatButton(
-                    child: Text('List Google Drive Files'),
-                    onPressed: _listGoogleDriveFiles,
+                ? Container(
+                    child: TextButton(
+                      child: Text('List Google Drive Files'),
+                      onPressed: _listGoogleDriveFiles,
+                    ),
                     color: Colors.green,
                   )
                 : Container()),
@@ -239,15 +266,19 @@ class _MyHomePageState extends State<MyHomePage> {
                   )
                 : Container()),
             (signedIn
-                ? FlatButton(
-                    child: Text('Google Logout'),
-                    onPressed: _logoutFromGoogle,
+                ? Container(
                     color: Colors.green,
+                    child: TextButton(
+                      child: Text('Google Logout'),
+                      onPressed: _logoutFromGoogle,
+                    ),
                   )
-                : FlatButton(
-                    child: Text('Google Login'),
-                    onPressed: _loginWithGoogle,
+                : Container(
                     color: Colors.red,
+                    child: TextButton(
+                      child: Text('Google Login'),
+                      onPressed: _loginWithGoogle,
+                    ),
                   )),
           ],
         ),
